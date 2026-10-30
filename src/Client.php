@@ -207,6 +207,55 @@ final class Client
     }
 
 
+    /**
+     * 允许传完整 URL，自动截出 key（服务端不接受以 / 开头的 key）。
+     */
+    private function normalizeFileKey(string $fileKey): string
+    {
+        $fileKey = trim($fileKey);
+        if ($fileKey === '') {
+            return '';
+        }
+
+        if (str_starts_with($fileKey, 'http://') || str_starts_with($fileKey, 'https://')) {
+            $path = (string)parse_url($fileKey, PHP_URL_PATH);
+            $fileKey = rawurldecode($path);
+        }
+
+        return ltrim($fileKey, '/');
+    }
+
+    /**
+    * 本地预校验，避免把非法内容发给服务端后才报 40000。
+    */
+    private function assertBase64(string $contents): void
+    {
+        if ($contents === '') {
+            throw new ConfigException('base64 内容不能为空');
+        }
+
+        $probe = $contents;
+        if (str_starts_with($probe, 'data:')) {
+            $comma = strpos($probe, ',');
+            if ($comma === false) {
+                throw new ConfigException('data URI 缺少逗号分隔符');
+            }
+            $probe = substr($probe, $comma + 1);
+        }
+
+        $probe = preg_replace('/\s+/', '', $probe) ?? '';
+        if ($probe === '') {
+            throw new ConfigException('base64 内容不能为空');
+        }
+
+        if (preg_match('#^[A-Za-z0-9+/=_-]+$#', $probe) !== 1 || base64_decode($probe, true) === false) {
+            throw new ConfigException(
+                '$contents 必须是 base64 字符串；二进制内容请先 base64_encode()，'
+                . '或改用 uploadContents() 走原始流上传'
+            );
+        }
+    }
+
 
     // ---------------- 内部：供 UploadRequest / Tools 调用 ----------------
 
@@ -259,6 +308,92 @@ final class Client
             )
         ));
     }
+
+    /**
+     * base64 上传（小文件通道，服务端默认上限 2MB，超出会返回 41300）。
+     *
+     * - $contents 必须是 base64 字符串，可带 data URI 前缀（data:image/png;base64,xxx）
+     * - 已经是二进制内容请用 uploadContents()（走原始流，更省内存）
+     * - $fileName 为空时由服务端按文件头自动命名
+     *
+     * @param string|null $path     自定义子路径，如 users/1；为空则不传
+     * @param string|null $mimeType 强制 MIME；为空则由服务端按文件头推断
+     */
+    public function uploadBase64(
+        string  $contents,
+        ?string $fileName = null,
+        ?string $path = null,
+        ?string $mimeType = null,
+    ): UploadResult
+    {
+        $contents = trim($contents);
+        $this->assertBase64($contents);
+
+        $payload = ['file' => $contents];
+        if ($fileName !== null && trim($fileName) !== '') {
+            $payload['file_name'] = trim($fileName);
+        }
+        if ($path !== null && trim($path) !== '') {
+            $payload['path'] = trim($path);
+        }
+        if ($mimeType !== null && trim($mimeType) !== '') {
+            $payload['mime_type'] = trim($mimeType);
+        }
+
+        return UploadResult::fromArray(
+            $this->postJson('/api/v1/upload/base64', $payload, true)
+        );
+    }
+
+
+    /**
+     * 把本地文件读出来做 base64 上传。
+     * 仅适合小文件（base64 会放大 33% 且整段进内存），大文件请用 upload()。
+     */
+    public function uploadBase64File(string $localPath, ?string $fileName = null): UploadResult
+    {
+        if (!is_file($localPath) || !is_readable($localPath)) {
+            throw new ConfigException('文件不存在或不可读: ' . $localPath);
+        }
+
+        $contents = file_get_contents($localPath);
+        if ($contents === false) {
+            throw new ConfigException('读取文件失败: ' . $localPath);
+        }
+
+        return $this->uploadBase64(
+            base64_encode($contents),
+            $fileName ?? basename($localPath)
+        );
+    }
+
+    /**
+     * 通用 JSON POST，返回响应里的 data 部分。
+     *
+     * @param array<string, mixed> $payload
+     */
+    public function postJson(string $path, array $payload, bool $appAuth = true): array
+    {
+        $headers = $this->baseHeaders($appAuth);
+        $headers['Content-Type'] = 'application/json';
+
+        $body = json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        $body = $body === false ? '{}' : $body;
+
+        return $this->decode($this->transport->send(
+            new HttpRequest(
+                method: 'POST',
+                url: $this->url($path),
+                headers: $headers,
+                body: $body,
+                contentLength: strlen($body),
+                timeout: (float)$this->config->timeout,
+                connectTimeout: (float)$this->config->connectTimeout,
+                verifySsl: $this->config->verifySsl,
+            )
+        ));
+    }
+
 
     /**
      * @internal
