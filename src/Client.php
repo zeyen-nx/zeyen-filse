@@ -16,6 +16,7 @@ use Zeyen\Filse\Upload\PageResult;
 use Zeyen\Filse\Upload\PrivateUrlResult;
 use Zeyen\Filse\Upload\UploadRequest;
 use Zeyen\Filse\Upload\UploadResult;
+use Zeyen\Filse\Support\RequestOrigin;
 
 final class Client
 {
@@ -140,30 +141,97 @@ final class Client
         )));
     }
 
+    /**
+     * 按 file_key 删除文件：删七牛对象 + 删除上传记录。
+     *
+     * 幂等：七牛侧对象已不存在时服务端仍返回成功（alreadyAbsent=true）。
+     * 记录不存在抛 ApiException(code=40400)。
+     * 也接受完整访问 URL，会自动截成 key。
+     *
+     * @param bool $dryRun true 时只校验（回显 file_size / access_type / created_at），不真删
+     */
+    public function deleteFile(string $fileKey, bool $dryRun = false): DeleteResult
+    {
+        $fileKey = $this->normalizeFileKey($fileKey);
+        if ($fileKey === '') {
+            throw new ConfigException('file_key 不能为空');
+        }
+
+        $payload = ['file_key' => $fileKey];
+        if ($dryRun) {
+            $payload['dry_run'] = '1';
+        }
+
+        $headers = $this->baseHeaders(true);
+        $headers['Content-Type'] = 'application/x-www-form-urlencoded';
+        $body = http_build_query($payload);
+
+        return DeleteResult::fromArray($this->decode($this->transport->send(
+            new HttpRequest(
+                method: 'POST',
+                url: $this->url('/api/v1/files/delete'),
+                headers: $headers,
+                body: $body,
+                contentLength: strlen($body),
+                timeout: (float)$this->config->timeout,
+                connectTimeout: (float)$this->config->connectTimeout,
+                verifySsl: $this->config->verifySsl,
+            )
+        )));
+    }
+
+    /**
+     * 批量删除：逐条调用，单条失败不影响其余。
+     *
+     * @param list<string> $fileKeys
+     * @return array{results: array<string, DeleteResult>, errors: array<string, string>}
+     */
+    public function deleteFiles(array $fileKeys, bool $dryRun = false): array
+    {
+        $results = [];
+        $errors = [];
+
+        foreach ($fileKeys as $fileKey) {
+            $fileKey = $this->normalizeFileKey((string)$fileKey);
+            if ($fileKey === '' || isset($results[$fileKey]) || isset($errors[$fileKey])) {
+                continue;
+            }
+            try {
+                $results[$fileKey] = $this->deleteFile($fileKey, $dryRun);
+            } catch (ApiException $e) {
+                $errors[$fileKey] = $e->getMessage();
+            }
+        }
+
+        return ['results' => $results, 'errors' => $errors];
+    }
+
+
+
     // ---------------- 内部：供 UploadRequest / Tools 调用 ----------------
 
     /**
      * @param array<string, scalar> $query
      * @internal
      */
-    public function rawUpload(array $query, ?string $filePath, ?string $contents): array
+    public function rawUpload(array $query, ?string $filePath, ?string $contents, ?string $contentType = null): array
     {
         $headers = $this->baseHeaders(true);
-        $headers['Content-Type'] = 'application/octet-stream';
+        $headers['Content-Type'] = $contentType ?? 'application/octet-stream';
 
-        $size = $filePath !== null ? (int)filesize($filePath) : strlen((string)$contents);
-        $headers['Content-Length'] = (string)$size;
+        $size = $filePath !== null ? (int) filesize($filePath) : strlen((string) $contents);
+        $headers['Content-Length'] = (string) $size;
 
         return $this->decode($this->transport->send(
             new HttpRequest(
                 method: 'POST',
                 url: $this->url('/api/v1/upload', $query),
                 headers: $headers,
-                body: $filePath === null ? (string)$contents : null,
+                body: $filePath === null ? (string) $contents : null,
                 filePath: $filePath,
                 contentLength: $size,
-                timeout: (float)$this->config->timeout,
-                connectTimeout: (float)$this->config->connectTimeout,
+                timeout: (float) $this->config->timeout,
+                connectTimeout: (float) $this->config->connectTimeout,
                 verifySsl: $this->config->verifySsl,
             )
         ));
@@ -242,14 +310,16 @@ final class Client
             'User-Agent' => $this->config->userAgent,
         ];
 
-        if ($this->config->origin !== null) {
-            // 应用开启域名白名单时必须带 Origin
-            $headers['Origin'] = $this->config->origin;
+        // 默认按「当前这次请求」推导：Origin → Referer → Host + 协议
+        $origin = $this->config->origin
+            ?? ($this->config->originAuto ? RequestOrigin::detect() : null);
+        if ($origin !== null) {
+            $headers['Origin'] = $origin;
         }
 
         if ($appAuth && $this->config->hasAppCredentials()) {
-            $headers['X-App-Id'] = (string)$this->config->appId;
-            $headers['X-App-Key'] = (string)$this->config->appKey;
+            $headers['X-App-Id'] = (string) $this->config->appId;
+            $headers['X-App-Key'] = (string) $this->config->appKey;
 
             return $headers;
         }

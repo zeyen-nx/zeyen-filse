@@ -57,6 +57,7 @@ final class MimeTypes
         'so' => 'application/x-executable',
     ];
 
+
     public static function guess(string $fileName): string
     {
         $ext = strtolower((string)pathinfo($fileName, PATHINFO_EXTENSION));
@@ -67,5 +68,23 @@ final class MimeTypes
     public static function fromExtension(string $ext): string
     {
         return self::MAP[strtolower(ltrim($ext, '.'))] ?? 'application/octet-stream';
+    }
+
+    public static function extFromMime(string $mime): string
+    {
+        $mime = strtolower(trim(explode(';', $mime)[0]));
+        if ($mime === '') {
+            return '';
+        }
+
+        static $reverse = null;
+        if ($reverse === null) {
+            $reverse = [];
+            foreach (self::MAP as $ext => $type) {
+                $reverse[$type] ??= $ext;
+            }
+        }
+
+        return $reverse[$mime] ?? '';
     }
 }
