@@ -1,0 +1,34 @@
+{
+  "name": "zeyen/filse",
+  "description": "PHP client for the image-hosting / file-uploads gateway: upload, private URL, file list and qiniu key tools.",
+  "type": "library",
+  "license": "MIT",
+  "keywords": ["upload", "qiniu", "file", "image-hosting", "storage"],
+  "require": {
+    "php": "^8.3",
+    "ext-curl": "*",
+    "ext-json": "*"
+  },
+  "require-dev": {
+    "phpunit/phpunit": "^11.0"
+  },
+  "suggest": {
+    "psr/http-client": "接入框架自带 HTTP 客户端时使用 Psr18Transport",
+    "psr/http-factory": "Psr18Transport 需要 RequestFactory / StreamFactory",
+    "psr/http-message": "Psr18Transport 需要 PSR-7 消息接口"
+  },
+  "autoload": {
+    "psr-4": {
+      "Zeyen\\Filse\\": "src/"
+    }
+  },
+  "autoload-dev": {
+    "psr-4": {
+      "Zeyen\\Filse\\Tests\\": "tests/"
+    }
+  },
+  "config": {
+    "sort-packages": true
+  },
+  "minimum-stability": "stable"
+}

@@ -1,0 +1,296 @@
+<?php
+
+
+declare(strict_types=1);
+
+namespace Zeyen\Filse;
+
+use Zeyen\Filse\Exception\ApiException;
+use Zeyen\Filse\Exception\ConfigException;
+use Zeyen\Filse\Exception\TransportException;
+use Zeyen\Filse\Http\CurlTransport;
+use Zeyen\Filse\Http\HttpRequest;
+use Zeyen\Filse\Http\HttpResponse;
+use Zeyen\Filse\Http\TransportInterface;
+use Zeyen\Filse\Upload\PageResult;
+use Zeyen\Filse\Upload\PrivateUrlResult;
+use Zeyen\Filse\Upload\UploadRequest;
+use Zeyen\Filse\Upload\UploadResult;
+
+final class Client
+{
+    private readonly TransportInterface $transport;
+
+    public function __construct(
+        private readonly Config $config,
+        ?TransportInterface     $transport = null,
+    )
+    {
+        $this->transport = $transport ?? new CurlTransport();
+    }
+
+    /**
+     * @param array<string, mixed> $config 见 Config::fromArray
+     */
+    public static function create(array $config, ?TransportInterface $transport = null): self
+    {
+        return new self(Config::fromArray($config), $transport);
+    }
+
+    public static function fromEnv(string $prefix = 'FILSE_', array $overrides = [], ?TransportInterface $transport = null): self
+    {
+        return new self(Config::fromEnv($prefix, $overrides), $transport);
+    }
+
+    public static function fromEnvFile(string $path, string $prefix = 'FILSE_', array $overrides = [], ?TransportInterface $transport = null): self
+    {
+        return new self(Config::fromEnvFile($path, $prefix, $overrides), $transport);
+    }
+
+    public function config(): Config
+    {
+        return $this->config;
+    }
+
+    public function withApp(string $appId, string $appKey): self
+    {
+        return new self($this->config->withApp($appId, $appKey), $this->transport);
+    }
+
+    public function tools(): Tools
+    {
+        return new Tools($this);
+    }
+
+    // ---------------- 业务接口 ----------------
+
+    /**
+     * 数据库连通性检查。
+     * @return array{status?: string}
+     */
+    public function health(): array
+    {
+        return $this->decode($this->transport->send(
+            new HttpRequest(
+                method: 'GET',
+                url: $this->url('/health'),
+                headers: $this->baseHeaders(false),
+                timeout: (float)$this->config->timeout,
+                connectTimeout: (float)$this->config->connectTimeout,
+                verifySsl: $this->config->verifySsl,
+            )
+        ));
+    }
+
+    public function upload(string $localPath): UploadRequest
+    {
+        if (!is_file($localPath) || !is_readable($localPath)) {
+            throw new ConfigException('文件不存在或不可读: ' . $localPath);
+        }
+
+        return new UploadRequest($this, $localPath);
+    }
+
+    public function uploadContents(string $contents, ?string $fileName = null): UploadRequest
+    {
+        return (new UploadRequest($this, null, $contents))->fileName($fileName);
+    }
+
+    public function privateUrl(string $fileKey, ?int $expires = null): PrivateUrlResult
+    {
+        $payload = ['file_key' => $fileKey];
+        if ($expires !== null) {
+            $payload['expires'] = $expires;
+        }
+
+        $headers = $this->baseHeaders(true);
+        $headers['Content-Type'] = 'application/x-www-form-urlencoded';
+        $body = http_build_query($payload);
+
+        return PrivateUrlResult::fromArray($this->decode($this->transport->send(
+            new HttpRequest(
+                method: 'POST',
+                url: $this->url('/api/v1/private-url'),
+                headers: $headers,
+                body: $body,
+                contentLength: strlen($body),
+                timeout: (float)$this->config->timeout,
+                connectTimeout: (float)$this->config->connectTimeout,
+                verifySsl: $this->config->verifySsl,
+            )
+        )));
+    }
+
+    public function files(int $page = 1, int $pageSize = 20, ?int $accessType = null): PageResult
+    {
+        $query = ['page' => max(1, $page), 'page_size' => max(1, min(100, $pageSize))];
+        if ($accessType === 1 || $accessType === 2) {
+            $query['access_type'] = $accessType;
+        }
+
+        return PageResult::fromArray($this->decode($this->transport->send(
+            new HttpRequest(
+                method: 'GET',
+                url: $this->url('/api/v1/files', $query),
+                headers: $this->baseHeaders(true),
+                timeout: (float)$this->config->timeout,
+                connectTimeout: (float)$this->config->connectTimeout,
+                verifySsl: $this->config->verifySsl,
+            )
+        )));
+    }
+
+    // ---------------- 内部：供 UploadRequest / Tools 调用 ----------------
+
+    /**
+     * @param array<string, scalar> $query
+     * @internal
+     */
+    public function rawUpload(array $query, ?string $filePath, ?string $contents): array
+    {
+        $headers = $this->baseHeaders(true);
+        $headers['Content-Type'] = 'application/octet-stream';
+
+        $size = $filePath !== null ? (int)filesize($filePath) : strlen((string)$contents);
+        $headers['Content-Length'] = (string)$size;
+
+        return $this->decode($this->transport->send(
+            new HttpRequest(
+                method: 'POST',
+                url: $this->url('/api/v1/upload', $query),
+                headers: $headers,
+                body: $filePath === null ? (string)$contents : null,
+                filePath: $filePath,
+                contentLength: $size,
+                timeout: (float)$this->config->timeout,
+                connectTimeout: (float)$this->config->connectTimeout,
+                verifySsl: $this->config->verifySsl,
+            )
+        ));
+    }
+
+    /**
+     * @internal
+     */
+    public function multipartUpload(string $body, string $boundary): array
+    {
+        $headers = $this->baseHeaders(true);
+        $headers['Content-Type'] = 'multipart/form-data; boundary=' . $boundary;
+        $headers['Content-Length'] = (string)strlen($body);
+
+        return $this->decode($this->transport->send(
+            new HttpRequest(
+                method: 'POST',
+                url: $this->url('/api/v1/upload'),
+                headers: $headers,
+                body: $body,
+                contentLength: strlen($body),
+                timeout: (float)$this->config->timeout,
+                connectTimeout: (float)$this->config->connectTimeout,
+                verifySsl: $this->config->verifySsl,
+            )
+        ));
+    }
+
+    /**
+     * @internal
+     */
+    public function toolsRequest(string $path, array $payload, bool $appAuth): array
+    {
+        $headers = $this->baseHeaders($appAuth);
+        $headers['Content-Type'] = 'application/json';
+
+        $body = json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        $body = $body === false ? '{}' : $body;
+
+        return $this->decode($this->transport->send(
+            new HttpRequest(
+                method: 'POST',
+                url: $this->url($path),
+                headers: $headers,
+                body: $body,
+                contentLength: strlen($body),
+                timeout: (float)$this->config->timeout,
+                connectTimeout: (float)$this->config->connectTimeout,
+                verifySsl: $this->config->verifySsl,
+            )
+        ));
+    }
+
+    // ---------------- 内部工具 ----------------
+
+    /**
+     * @param array<string, scalar> $query
+     */
+    private function url(string $path, array $query = []): string
+    {
+        $url = $this->config->baseUrl . '/' . ltrim($path, '/');
+        if ($query !== []) {
+            $url .= '?' . http_build_query($query, '', '&', PHP_QUERY_RFC3986);
+        }
+
+        return $url;
+    }
+
+    /**
+     * @return array<string, string>
+     */
+    private function baseHeaders(bool $appAuth): array
+    {
+        $headers = [
+            'Accept' => 'application/json',
+            'User-Agent' => $this->config->userAgent,
+        ];
+
+        if ($this->config->origin !== null) {
+            // 应用开启域名白名单时必须带 Origin
+            $headers['Origin'] = $this->config->origin;
+        }
+
+        if ($appAuth && $this->config->hasAppCredentials()) {
+            $headers['X-App-Id'] = (string)$this->config->appId;
+            $headers['X-App-Key'] = (string)$this->config->appKey;
+
+            return $headers;
+        }
+
+        if ($this->config->adminToken !== null) {
+            $headers['X-Admin-Token'] = $this->config->adminToken;
+
+            return $headers;
+        }
+
+        if ($appAuth) {
+            throw new ConfigException('需要配置 app_id 与 app_key（或 admin_token）');
+        }
+
+        return $headers;
+    }
+
+    private function decode(HttpResponse $response): array
+    {
+        $json = $response->json();
+        if ($json === null) {
+            throw new ApiException(
+                apiCode: -1,
+                message: sprintf('响应不是合法 JSON (HTTP %d): %s', $response->status, mb_substr($response->body, 0, 300)),
+                httpStatus: $response->status,
+            );
+        }
+
+        $code = (int)($json['code'] ?? -1);
+        if ($code !== 0) {
+            throw new ApiException(
+                apiCode: $code,
+                message: (string)($json['msg'] ?? '未知错误'),
+                httpStatus: $response->status,
+                requestId: isset($json['request_id']) ? (string)$json['request_id'] : null,
+                payload: $json,
+            );
+        }
+
+        $data = $json['data'] ?? [];
+
+        return is_array($data) ? $data : [];
+    }
+}
