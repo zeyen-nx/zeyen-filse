@@ -54,7 +54,7 @@ final class Config
         $this->timeout = max(1, $timeout);
         $this->connectTimeout = max(1, $connectTimeout);
         $this->verifySsl = $verifySsl;
-        $this->userAgent = self::str($userAgent) ?? 'zeyen-filse/1.0 (+php)';
+        $this->userAgent = self::str($userAgent) ?? 'zeyen-filse/1.0 (Tornado)';
     }
 
     /**
