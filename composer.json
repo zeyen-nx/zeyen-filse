@@ -4,6 +4,15 @@
   "type": "library",
   "license": "MIT",
   "keywords": ["upload", "qiniu", "file", "image-hosting", "storage"],
+  "homepage": "https://github.com/zeyen-nx/zeyen-filse",
+  "authors": [
+    {
+      "name": "zeyen",
+      "email": "zeyen@aliyun.com",
+      "homepage": "https://www.zeyen.cn",
+      "role": "Developer"
+    }
+  ],
   "require": {
     "php": "^8.3",
     "ext-curl": "*",
