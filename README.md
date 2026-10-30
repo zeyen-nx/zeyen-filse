@@ -1,9 +1,10 @@
 # zeyen/filse
 
-PHP 8.3+ 文件上传客户端（Composer 包）。一行配置接入上传、私有链接、文件列表、删除与运维工具接口，不依赖任何框架，原生 / Laravel / ThinkPHP / Hyperf 均可用。
+PHP 8.3+ 文件上传客户端（Composer 包）。一行配置接入上传、base64 上传、私有链接、文件列表、删除与密钥工具，不依赖任何框架，原生 / Laravel / ThinkPHP / Hyperf 均可用。
 
 - 零运行时依赖：只用 `ext-curl` + `ext-json`
-- 大文件流式上传，不占内存（默认通道）
+- 大文件流式上传，内存占用恒定
+- 小文件支持 base64 直传（JSON 提交，可带 data URI 前缀）
 - 文件后缀以文件头魔数为准，客户端文件名错了也能自动纠正
 - 参数按需发送：没设置 `path` / `file_name` 就完全不传
 - 所有返回都是只读 DTO，`->fileKey`、`->url` 直接取
@@ -17,7 +18,9 @@ PHP 8.3+ 文件上传客户端（Composer 包）。一行配置接入上传、�
 - [安装](#安装)
 - [快速开始](#快速开始)
 - [配置](#配置)
+- [API 一览](#api-一览)
 - [上传文件](#上传文件)
+- [base64 上传](#base64-上传)
 - [私有文件链接](#私有文件链接)
 - [文件列表](#文件列表)
 - [删除文件](#删除文件)
@@ -171,6 +174,23 @@ $client = new Client(
 
 > 不要为了绕过校验随便填一个域名，网关会记录来源 IP 与请求 ID。
 
+## API 一览
+
+| 方法 | 返回 | 说明 |
+| --- | --- | --- |
+| `health()` | `array` | 连通性检查 |
+| `upload(string $path)` | `UploadRequest` | 本地文件上传（默认流式） |
+| `uploadContents(string $bin, ?string $name)` | `UploadRequest` | 二进制内容上传（默认流式） |
+| `uploadBase64(string $b64, ?string $name, ?string $path, ?string $mime)` | `UploadResult` | base64 小文件上传 |
+| `uploadBase64File(string $path, ?string $name)` | `UploadResult` | 本地小文件转 base64 上传 |
+| `privateUrl(string $fileKey, ?int $expires)` | `PrivateUrlResult` | 私有文件换签名链接 |
+| `files(int $page, int $size, ?int $accessType)` | `PageResult` | 文件列表 |
+| `deleteFile(string $fileKey, bool $dryRun)` | `DeleteResult` | 删对象 + 删记录 |
+| `deleteFiles(array $keys, bool $dryRun)` | `array{results,errors}` | 批量删除 |
+| `tools()` | `Tools` | 密钥哈希 / 七牛密钥加解密 |
+| `withApp(string $id, string $key)` | `Client` | 换应用凭据 |
+| `config()` | `Config` | 取当前配置 |
+
 ## 上传文件
 
 ### 基础用法
@@ -220,6 +240,7 @@ $client->upload('/tmp/a.jpg')->fileName('封面.jpg')->send();  // 只发 file_n
 | --- | --- | --- |
 | 原始流（默认） | 什么都不用写 | `CURLOPT_UPLOAD` 流式读取，内存占用恒定，适合大文件 |
 | multipart | `->asForm()` | 服务端解析表单，可附带普通字段，文件会被整体读入内存 |
+| base64 | `uploadBase64()` | JSON 提交，全量进内存，仅适合小文件 |
 
 ### 后缀纠正规则
 
@@ -246,6 +267,65 @@ SDK 读取前 4KB 魔数判断真实格式，再决定文件名后缀：
 | `fileSize` | int | 字节数 |
 | `expiresIn` | ?int | 私有文件的链接有效期（秒） |
 | `raw` | array | 原始响应 |
+
+## base64 上传
+
+手上已经是一段 base64 字符串时（Canvas 导出、第三方回调、只允许 JSON 的中间层），用这个通道。
+
+```php
+use Zeyen\Filse\Exception\ApiException;
+
+// 1) 纯 base64
+$res = $client->uploadBase64(
+    base64_encode($binary),
+    'avatar.png',
+    path: 'users/1',
+);
+
+// 2) 带 data URI 前缀（原样传即可，服务端会解析）
+$res = $client->uploadBase64('data:image/png;base64,iVBORw0KGgo...');
+
+// 3) 不传文件名 → 服务端按文件头自动命名
+$res = $client->uploadBase64(base64_encode($png));
+
+// 4) 本地小文件（SDK 帮你编码）
+$res = $client->uploadBase64File('/tmp/avatar.png');
+
+echo $res->fileKey;
+```
+
+### 方法签名
+
+```php
+public function uploadBase64(
+    string  $contents,
+    ?string $fileName = null,
+    ?string $path = null,
+    ?string $mimeType = null,
+): UploadResult;
+
+public function uploadBase64File(string $localPath, ?string $fileName = null): UploadResult;
+```
+
+| 参数 | 说明 |
+| --- | --- |
+| `$contents` | **必须是 base64 字符串**，支持 URL-safe 变体与 data URI 前缀 |
+| `$fileName` | 为空则由服务端按文件头命名 |
+| `$path` | 自定义子路径，为空则不传 |
+| `$mimeType` | 强制 MIME，传了就不做内容嗅探覆盖 |
+
+### 行为说明
+
+| 情况 | 结果 |
+| --- | --- |
+| 换行、空格、`-` `_` 变体 | SDK 与网关都能容错解码 |
+| 传入的是原始二进制 | 立即抛 `ConfigException`，提示改用 `uploadContents()` |
+| data URI 缺逗号 / 非 base64 | 立即抛 `ConfigException` |
+| 解码后超过上限 | 网关返回 `41300`（`$e->isPayloadTooLarge()`） |
+| 解码后 0 字节 | 网关返回 `40000` |
+| 私有应用 | 返回 `url_expires_in`，`url` 为临时签名链接 |
+
+> 上限由服务端 `BASE64_MAX_SIZE` 控制（默认 2MB，指解码后大小）。base64 会让报文膨胀约 33%，且整段进内存，**大文件请继续用 `upload()`**。
 
 ## 私有文件链接
 
@@ -366,7 +446,7 @@ try {
     $e->isPayloadTooLarge();
 } catch (TransportException $e) {    // 网络层失败（DNS、超时、TLS）
     $e->getMessage();
-} catch (ConfigException $e) {       // 配置缺失（base_url、凭据）
+} catch (ConfigException $e) {       // 配置缺失（base_url、凭据、非法入参）
     $e->getMessage();
 }
 ```
@@ -374,11 +454,11 @@ try {
 | code | 含义 | 建议处理 |
 | --- | --- | --- |
 | `0` | 成功 | — |
-| `40000` | 参数错误 | 检查 `file_key`、`path`、`expires` |
+| `40000` | 参数错误 | 检查 `file_key`、`path`、`expires`、base64 内容 |
 | `40100` | 应用不存在或密钥错误 | 核对 `app_id` / `app_key` |
 | `40300` | 来源域名不在白名单 / 权限不足 | 看异常信息里的 Origin，把该域名加入白名单 |
 | `40400` | 文件不存在 | 删除、私有链接时先确认 key |
-| `41300` | 文件或请求体过大 | 检查 `MAX_FILE_SIZE` 与本机 php.ini |
+| `41300` | 文件或请求体过大 | 检查应用上限与 base64 通道上限 |
 | `42900` | 配额超限 | 次日重试或提升配额 |
 | `50000` | 服务端内部错误 | 带 `request_id` 反馈 |
 | `50200` | 上游存储错误 | 可重试；持续失败联系运维 |
@@ -452,6 +532,19 @@ public function store(Request $request, Client $client)
 }
 ```
 
+前端直接丢 base64 过来的场景：
+
+```php
+public function avatar(Request $request, Client $client)
+{
+    return $client->uploadBase64(
+        (string) $request->input('image'),
+        'avatar.png',
+        path: 'users/' . $request->user()->id,
+    );
+}
+```
+
 ### ThinkPHP
 
 ```php
@@ -484,7 +577,7 @@ zeyen-filse/
 ├── examples/
 │   └── plain.php
 └── src/
-    ├── Client.php              # 入口：上传/私有链接/列表/删除/工具
+    ├── Client.php              # 入口：上传/base64/私有链接/列表/删除/工具
     ├── Config.php              # 配置解析（数组 / 环境变量 / .env）
     ├── Tools.php               # 运维工具接口
     ├── Exception/
@@ -525,8 +618,14 @@ SDK 已按文件头纠正后缀。若确实需要原样保留（例如特殊后�
 **Q：报 `40000 缺少 file 字段`**
 表单通道里 `filename` 为空会被服务端当成普通字段。SDK 保证了 part filename 一定非空，出现该错误通常是自己手写了 multipart 请求。
 
+**Q：base64 上传报 `ConfigException`**
+`uploadBase64()` 的第一个参数必须是 base64 **字符串**。手上是二进制或文件路径时，用 `uploadContents()` / `upload()`，或 `uploadBase64File()`。
+
+**Q：base64 上传报 `41300`**
+超过服务端 `BASE64_MAX_SIZE`（默认 2MB，解码后大小）。大文件请走原始流通道。
+
 **Q：大文件上传内存爆掉**
-确认没有调用 `->asForm()`。默认原始流通道是流式读取，内存占用恒定。
+确认没有调用 `->asForm()` 或 `uploadBase64*()`。默认原始流通道是流式读取，内存占用恒定。
 
 **Q：上传很慢，每次都多等 1 秒**
 cURL 默认会发 `Expect: 100-continue`。`CurlTransport` 已显式禁用，自定义传输层时记得加 `Expect:` 空头。
